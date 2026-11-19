@@ -19,7 +19,7 @@ runBtn.addEventListener("click", async () => {
 
   chrome.storage.local.set({ groqKey: apiKey, markAi });
   runBtn.disabled = true;
-  statusDiv.textContent = "Заполняю по вашей инструкции (Title, 49 слов, категория)...";
+  statusDiv.textContent = "Запускаю обработку по вашей инструкции...";
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
@@ -49,26 +49,27 @@ runBtn.addEventListener("click", async () => {
         return "Не найдены карточки фотографий на странице. Убедитесь, что открыта вкладка Uploaded Files.";
       }
 
+      // Миниатюра 256px (расходует в 3 раза меньше токенов Groq, оригинальное фото на Adobe не трогает)
       const getImageBase64 = (imgEl) => {
         return new Promise((resolve) => {
           const tempImg = new Image();
           tempImg.crossOrigin = "anonymous";
           tempImg.onload = () => {
             const canvas = document.createElement("canvas");
-            const scale = 384 / Math.max(tempImg.naturalWidth, tempImg.naturalHeight, 1);
-            canvas.width = Math.round(tempImg.naturalWidth * scale) || 384;
-            canvas.height = Math.round(tempImg.naturalHeight * scale) || 384;
+            const scale = 256 / Math.max(tempImg.naturalWidth, tempImg.naturalHeight, 1);
+            canvas.width = Math.round(tempImg.naturalWidth * scale) || 256;
+            canvas.height = Math.round(tempImg.naturalHeight * scale) || 256;
             const ctx = canvas.getContext("2d");
             ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-            resolve(canvas.toDataURL("image/jpeg", 0.72));
+            resolve(canvas.toDataURL("image/jpeg", 0.7));
           };
           tempImg.onerror = () => {
             const canvas = document.createElement("canvas");
-            canvas.width = 384;
-            canvas.height = 384;
+            canvas.width = 256;
+            canvas.height = 256;
             const ctx = canvas.getContext("2d");
-            ctx.drawImage(imgEl, 0, 0, 384, 384);
-            resolve(canvas.toDataURL("image/jpeg", 0.72));
+            ctx.drawImage(imgEl, 0, 0, 256, 256);
+            resolve(canvas.toDataURL("image/jpeg", 0.7));
           };
           tempImg.src = imgEl.src;
         });
@@ -89,7 +90,6 @@ runBtn.addEventListener("click", async () => {
         element.dispatchEvent(new Event("change", { bubbles: true }));
       };
 
-      // Соответствие ваших кодов категорий Adobe Stock
       const CATEGORY_NAMES = {
         2: ["building", "architecture", "здания", "архитектура", "интерьер"],
         5: ["landscape", "nature", "пейзаж", "природа"],
@@ -118,32 +118,14 @@ runBtn.addEventListener("click", async () => {
 
         const base64Image = await getImageBase64(img);
 
-        const prompt = `You are a professional Adobe Stock metadata agent. Analyze this image and return ONLY a valid JSON object with keys: "title", "keywords", "category".
-
-CRITICAL RULES:
-1. "title":
-   - English language, up to 200 characters (aim for 120-185 chars).
-   - NO period at the end, first word capitalized, NO brand names.
-   - Must explicitly include: what is depicted + who is depicted (if a person is present) + environment/setting + lighting/atmosphere + ending with a commercial concept.
-   - Example style: "Double exposure portrait of young african woman with plant textures on warm background identity and nature harmony concept"
-
-2. "keywords":
-   - Array of AT LEAST 52 single English search words (we will trim to exact 49).
-   - Strictly 1 word per item, lowercase only, NO phrases, NO hyphens, NO duplicates.
-   - First 10 words MUST be the most important core nouns/subjects from the scene.
-   - Only real commercial buyer search terms. Strictly FORBIDDEN trash/AI words: overlayeffect, visual, designconcept, concept, shot, ai, generated, render, midjourney.
-
-3. "category":
-   - Return ONLY one integer from this exact rule:
-     * 6 (Feelings) or 12 (Lifestyle) for portraits/people
-     * 2 for interiors / architecture
-     * 5 for nature / landscapes
-     * 7 for food / drinks
-     * If in doubt, return 6.`;
+        const prompt = `Adobe Stock metadata JSON {"title","keywords","category"}:
+1."title": English <=190 chars, no ending period, capitalized, no brands: subject + person + setting + light + ending with concept.
+2."keywords": array of 53 single lowercase English words (no phrases/hyphens/duplicates), top 10 most relevant, NO trash/AI words (overlayeffect,visual,designconcept,concept,shot,ai,generated,render).
+3."category": integer: 6 or 12 for people, 2 interiors, 5 nature, 7 food, default 6.`;
 
         let successData = null;
 
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= 5; attempt++) {
           const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -174,19 +156,21 @@ CRITICAL RULES:
 
           const errMsg = data.error?.message || "";
           if (response.status === 429 || errMsg.toLowerCase().includes("rate limit")) {
-            await sleep(12000);
+            // Считываем точное время ожидания из ответа Groq (например, 15.2s) + 2 секунды запаса
+            const match = errMsg.match(/try again in ([\d.]+)s/i);
+            const waitMs = match ? (Math.ceil(parseFloat(match[1])) + 2) * 1000 : 18000;
+            await sleep(waitMs);
           } else {
-            return `Остановлено на фото ${i + 1}. Ошибка Groq: ${errMsg || response.status}`;
+            return `Ошибка на фото ${i + 1}: ${errMsg || response.status}`;
           }
         }
 
         if (!successData) {
-          return `Остановлено на фото ${i + 1}: лимит запросов Groq. Подождите 1 минуту и нажмите снова.`;
+          return `Остановлено на фото ${i + 1}: сервер Groq перегружен, попробуйте ещё раз.`;
         }
 
         const parsed = JSON.parse(successData.choices[0].message.content);
 
-        // 1. Очищаем Title (до 200 символов, с заглавной, без точки в конце)
         if (parsed.title) {
           let cleanTitle = String(parsed.title)
             .replace(/\bshot\b/gi, "photo")
@@ -201,7 +185,6 @@ CRITICAL RULES:
           }
         }
 
-        // 2. Очищаем Keywords: ровно 49 одиночных слов без мусора и дублей
         const singleWords = [];
         for (const rawWord of parsed.keywords || []) {
           const clean = String(rawWord).trim().toLowerCase().replace(/[^a-z]/g, "");
@@ -209,15 +192,13 @@ CRITICAL RULES:
             singleWords.push(clean);
           }
         }
-        const exact49 = singleWords.slice(0, 49);
-        const finalKeywords = exact49.join(", ");
+        const finalKeywords = singleWords.slice(0, 49).join(", ");
 
         const kwInput = document.querySelector('textarea[name="keywords"], textarea[aria-label*="keyword" i], textarea[placeholder*="keyword" i]');
         if (kwInput && finalKeywords) {
           setNativeValue(kwInput, finalKeywords);
         }
 
-        // 3. Выбираем категорию по вашей таблице (2, 5, 6, 7, 12; по умолчанию 6)
         const catCode = [2, 5, 6, 7, 12].includes(Number(parsed.category)) ? Number(parsed.category) : 6;
         const catSelect = document.querySelector('select[name*="category" i], select[aria-label*="category" i], select');
         if (catSelect) {
@@ -232,7 +213,6 @@ CRITICAL RULES:
           }
         }
 
-        // 4. Галочка "Created using generative AI tools"
         if (shouldMarkAi) {
           const labels = Array.from(document.querySelectorAll("label, span, div"));
           const aiLabel = labels.find((el) => el.textContent && (
@@ -250,11 +230,11 @@ CRITICAL RULES:
 
         processedCount++;
         if (i < targetCards.length - 1) {
-          await sleep(8000);
+          await sleep(6000);
         }
       }
 
-      return `Готово! Заполнено фото: ${processedCount} из ${targetCards.length} (строго по вашей инструкции: Title + 49 слов + категория).`;
+      return `Готово! Успешно заполнено: ${processedCount} из ${targetCards.length} фото (Title + 49 слов + категория).`;
     },
     args: [apiKey, markAi]
   }, (results) => {
