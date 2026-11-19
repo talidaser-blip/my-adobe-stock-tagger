@@ -1,11 +1,17 @@
 const apiKeyInput = document.getElementById("apiKey");
 const aiCheckInput = document.getElementById("aiCheck");
 const runBtn = document.getElementById("runBtn");
+const stopBtn = document.getElementById("stopBtn");
 const statusDiv = document.getElementById("status");
 
 chrome.storage.local.get(["groqKey", "markAi"], (res) => {
   if (res.groqKey) apiKeyInput.value = res.groqKey;
   if (typeof res.markAi === "boolean") aiCheckInput.checked = res.markAi;
+});
+
+stopBtn.addEventListener("click", () => {
+  chrome.storage.local.set({ stopRequested: true });
+  statusDiv.textContent = "Команда отмены отправлена! Останавливаю...";
 });
 
 runBtn.addEventListener("click", async () => {
@@ -17,9 +23,9 @@ runBtn.addEventListener("click", async () => {
     return;
   }
 
-  chrome.storage.local.set({ groqKey: apiKey, markAi });
+  await chrome.storage.local.set({ groqKey: apiKey, markAi, stopRequested: false });
   runBtn.disabled = true;
-  statusDiv.textContent = "Запускаю обработку по вашей инструкции...";
+  statusDiv.textContent = "Идёт обработка... Если Groq попросит паузу для лимита, расширение само подождёт.";
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
@@ -33,43 +39,70 @@ runBtn.addEventListener("click", async () => {
     target: { tabId: tab.id },
     func: async (key, shouldMarkAi) => {
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const isStopped = async () => {
+        const res = await chrome.storage.local.get(["stopRequested"]);
+        return Boolean(res.stopRequested);
+      };
 
-      const allCards = Array.from(document.querySelectorAll('[data-testid="asset-card"], .upload-tile, [class*="asset-card"], [class*="upload-item"]'))
-        .filter((el) => el.querySelector('img'));
-
-      const selectedCards = allCards.filter((card) =>
-        card.getAttribute("aria-selected") === "true" ||
-        card.className.toLowerCase().includes("selected") ||
-        card.querySelector('input[type="checkbox"]:checked')
-      );
-
-      const targetCards = selectedCards.length > 0 ? selectedCards : allCards;
-
-      if (targetCards.length === 0) {
-        return "Не найдены карточки фотографий на странице. Убедитесь, что открыта вкладка Uploaded Files.";
+      const selectAllCheckbox = Array.from(document.querySelectorAll('input[type="checkbox"]')).find((cb) => {
+        const parentText = cb.closest("label, div, span")?.textContent || "";
+        return parentText.includes("Выбрать все") || parentText.includes("Select all");
+      });
+      if (selectAllCheckbox && selectAllCheckbox.checked) {
+        return "На странице активна галочка «Выбрать все» (100 файлов). Снимите её, выделите только нужные 1–5 фото и нажмите «Запустить».";
       }
 
-      // Миниатюра 256px (расходует в 3 раза меньше токенов Groq, оригинальное фото на Adobe не трогает)
+      const allImgs = Array.from(document.querySelectorAll("img")).filter((img) => {
+        const rect = img.getBoundingClientRect();
+        return rect.width >= 90 && rect.height >= 90 && rect.left < window.innerWidth * 0.72 && rect.top > 120;
+      });
+
+      const selectedImgs = allImgs.filter((img) => {
+        let el = img;
+        for (let depth = 0; depth < 6 && el; depth++) {
+          if (el.getAttribute("aria-selected") === "true") return true;
+          const cs = window.getComputedStyle(el);
+          if (
+            cs.borderColor.includes("20, 115, 230") ||
+            cs.outlineColor.includes("20, 115, 230") ||
+            cs.boxShadow.includes("20, 115, 230")
+          ) {
+            return true;
+          }
+          el = el.parentElement;
+        }
+        return false;
+      });
+
+      if (selectedImgs.length === 0) {
+        return "Не найдено выделенных фотографий. Кликните мышкой по нужному фото (чтобы появилась синяя рамка) и нажмите «Запустить».";
+      }
+
+      if (selectedImgs.length > 25) {
+        return `Выделено слишком много фото (${selectedImgs.length} шт.). Выделите от 1 до 15 фото за один раз.`;
+      }
+
+      // Оптимальная миниатюра 224px: минимальный расход токенов Groq, оригиналы на Adobe не меняются
       const getImageBase64 = (imgEl) => {
         return new Promise((resolve) => {
           const tempImg = new Image();
           tempImg.crossOrigin = "anonymous";
           tempImg.onload = () => {
             const canvas = document.createElement("canvas");
-            const scale = 256 / Math.max(tempImg.naturalWidth, tempImg.naturalHeight, 1);
-            canvas.width = Math.round(tempImg.naturalWidth * scale) || 256;
-            canvas.height = Math.round(tempImg.naturalHeight * scale) || 256;
+            const scale = 224 / Math.max(tempImg.naturalWidth, tempImg.naturalHeight, 1);
+            canvas.width = Math.round(tempImg.naturalWidth * scale) || 224;
+            canvas.height = Math.round(tempImg.naturalHeight * scale) || 224;
             const ctx = canvas.getContext("2d");
             ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-            resolve(canvas.toDataURL("image/jpeg", 0.7));
+            resolve(canvas.toDataURL("image/jpeg", 0.65));
           };
           tempImg.onerror = () => {
             const canvas = document.createElement("canvas");
-            canvas.width = 256;
-            canvas.height = 256;
+            canvas.width = 224;
+            canvas.height = 224;
             const ctx = canvas.getContext("2d");
-            ctx.drawImage(imgEl, 0, 0, 256, 256);
-            resolve(canvas.toDataURL("image/jpeg", 0.7));
+            ctx.drawImage(imgEl, 0, 0, 224, 224);
+            resolve(canvas.toDataURL("image/jpeg", 0.65));
           };
           tempImg.src = imgEl.src;
         });
@@ -107,25 +140,40 @@ runBtn.addEventListener("click", async () => {
       const MODEL_ID = "qwen/qwen3.8-27b";
       let processedCount = 0;
 
-      for (let i = 0; i < targetCards.length; i++) {
-        const card = targetCards[i];
-        card.scrollIntoView({ behavior: "smooth", block: "center" });
-        card.click();
-        await sleep(750);
+      for (let i = 0; i < selectedImgs.length; i++) {
+        if (await isStopped()) {
+          return `Остановлено! Успешно заполнено фото: ${processedCount} из ${selectedImgs.length}.`;
+        }
 
-        const img = card.querySelector("img");
-        if (!img) continue;
+        const img = selectedImgs[i];
+        img.scrollIntoView({ behavior: "smooth", block: "center" });
+
+        if (selectedImgs.length > 1) {
+          img.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+          img.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+          img.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+          await sleep(750);
+        }
+
+        if (await isStopped()) {
+          return `Остановлено! Успешно заполнено фото: ${processedCount} из ${selectedImgs.length}.`;
+        }
 
         const base64Image = await getImageBase64(img);
 
-        const prompt = `Adobe Stock metadata JSON {"title","keywords","category"}:
+        const prompt = `Adobe Stock JSON {"title","keywords","category"}:
 1."title": English <=190 chars, no ending period, capitalized, no brands: subject + person + setting + light + ending with concept.
 2."keywords": array of 53 single lowercase English words (no phrases/hyphens/duplicates), top 10 most relevant, NO trash/AI words (overlayeffect,visual,designconcept,concept,shot,ai,generated,render).
 3."category": integer: 6 or 12 for people, 2 interiors, 5 nature, 7 food, default 6.`;
 
         let successData = null;
 
-        for (let attempt = 1; attempt <= 5; attempt++) {
+        // До 12 попыток с терпеливым ожиданием сброса минутного лимита Groq (до 2 минут ожидания без обрыва)
+        for (let attempt = 1; attempt <= 12; attempt++) {
+          if (await isStopped()) {
+            return `Остановлено! Успешно заполнено фото: ${processedCount} из ${selectedImgs.length}.`;
+          }
+
           const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -155,18 +203,24 @@ runBtn.addEventListener("click", async () => {
           }
 
           const errMsg = data.error?.message || "";
-          if (response.status === 429 || errMsg.toLowerCase().includes("rate limit")) {
-            // Считываем точное время ожидания из ответа Groq (например, 15.2s) + 2 секунды запаса
+          if (response.status === 429 || response.status >= 500 || errMsg.toLowerCase().includes("rate limit") || errMsg.toLowerCase().includes("overloaded")) {
             const match = errMsg.match(/try again in ([\d.]+)s/i);
-            const waitMs = match ? (Math.ceil(parseFloat(match[1])) + 2) * 1000 : 18000;
-            await sleep(waitMs);
+            const waitMs = match ? (Math.ceil(parseFloat(match[1])) + 2) * 1000 : 12000;
+            // Разбиваем паузу на шаги по 1 сек, чтобы кнопка «Остановить» срабатывала мгновенно
+            const steps = Math.ceil(waitMs / 1000);
+            for (let s = 0; s < steps; s++) {
+              if (await isStopped()) {
+                return `Остановлено! Успешно заполнено фото: ${processedCount} из ${selectedImgs.length}.`;
+              }
+              await sleep(1000);
+            }
           } else {
             return `Ошибка на фото ${i + 1}: ${errMsg || response.status}`;
           }
         }
 
         if (!successData) {
-          return `Остановлено на фото ${i + 1}: сервер Groq перегружен, попробуйте ещё раз.`;
+          return `Остановлено на фото ${i + 1}: сервер Groq временно не отвечает, попробуйте через минуту.`;
         }
 
         const parsed = JSON.parse(successData.choices[0].message.content);
@@ -229,12 +283,17 @@ runBtn.addEventListener("click", async () => {
         }
 
         processedCount++;
-        if (i < targetCards.length - 1) {
-          await sleep(6000);
+        if (i < selectedImgs.length - 1) {
+          for (let s = 0; s < 5; s++) {
+            if (await isStopped()) {
+              return `Остановлено! Успешно заполнено фото: ${processedCount} из ${selectedImgs.length}.`;
+            }
+            await sleep(1000);
+          }
         }
       }
 
-      return `Готово! Успешно заполнено: ${processedCount} из ${targetCards.length} фото (Title + 49 слов + категория).`;
+      return `Готово! Успешно заполнено: ${processedCount} из ${selectedImgs.length} выбранных фото.`;
     },
     args: [apiKey, markAi]
   }, (results) => {
