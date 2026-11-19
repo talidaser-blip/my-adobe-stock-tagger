@@ -19,7 +19,7 @@ runBtn.addEventListener("click", async () => {
 
   chrome.storage.local.set({ groqKey: apiKey, markAi });
   runBtn.disabled = true;
-  statusDiv.textContent = "Запускаю обработку на странице Adobe Stock...";
+  statusDiv.textContent = "Ищу рабочую модель на вашем аккаунте Groq...";
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
@@ -89,27 +89,28 @@ runBtn.addEventListener("click", async () => {
         element.dispatchEvent(new Event("change", { bubbles: true }));
       };
 
-      // Автоматически находим рабочую Vision-модель на вашем аккаунте Groq
-      let activeModel = null;
+      // Получаем реальный список моделей вашего аккаунта Groq
       const modelsRes = await fetch("https://api.groq.com/openai/v1/models", {
         headers: { "Authorization": `Bearer ${key}` }
       });
-      if (modelsRes.ok) {
-        const modelsData = await modelsRes.json();
-        const availableIds = (modelsData.data || []).map((m) => m.id);
-        const preferred = [
-          "meta-llama/llama-4-maverick-17b-128e-instruct",
-          "llama-3.2-11b-vision-preview",
-          "llama-3.2-90b-vision-preview",
-          "meta-llama/llama-4-scout-17b-16e-instruct"
-        ];
-        activeModel = preferred.find((id) => availableIds.includes(id)) ||
-                      availableIds.find((id) => id.includes("vision") || id.includes("llama-4"));
+      if (!modelsRes.ok) {
+        const err = await modelsRes.json();
+        return `Ошибка авторизации Groq: ${err.error?.message || modelsRes.status}`;
       }
-      if (!activeModel) {
-        activeModel = "llama-3.2-11b-vision-preview";
+      const modelsData = await modelsRes.json();
+      const allAvailable = (modelsData.data || []).map((m) => m.id);
+
+      // Отбираем кандидатов, которые могут поддерживать картинки
+      const visionCandidates = allAvailable.filter((id) =>
+        /vision|maverick|scout|llama-4|qwen|gemma|pixtral|multimodal/i.test(id) &&
+        !/whisper|guard|tts|embed/i.test(id)
+      );
+
+      if (visionCandidates.length === 0) {
+        return `На аккаунте нет Vision-моделей. Доступные модели: ${allAvailable.join(", ")}`;
       }
 
+      let workingModel = null;
       let processedCount = 0;
 
       for (let i = 0; i < targetCards.length; i++) {
@@ -128,34 +129,48 @@ Strict rules:
 1. "title": Commercial descriptive English title between 100 and 180 characters. No brand names or trademarks.
 2. "keywords": Array of EXACTLY 48 single English words (strictly 1 word per item, NO two-word phrases, NO hyphens). Ordered by descending relevance (most important visual subjects first, conceptual words after).`;
 
-        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${key}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            model: activeModel,
-            messages: [
-              {
-                role: "user",
-                content: [
-                  { type: "text", text: prompt },
-                  { type: "image_url", image_url: { url: base64Image } }
-                ]
-              }
-            ],
-            response_format: { type: "json_object" },
-            temperature: 0.25
-          })
-        });
+        const candidatesToTry = workingModel ? [workingModel] : visionCandidates;
+        let successData = null;
+        let lastError = "";
 
-        const data = await response.json();
-        if (!response.ok) {
-          return `Остановлено на фото ${i + 1} (${activeModel}). Ошибка Groq: ${data.error?.message || response.status}`;
+        for (const modelId of candidatesToTry) {
+          const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${key}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              model: modelId,
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    { type: "text", text: prompt },
+                    { type: "image_url", image_url: { url: base64Image } }
+                  ]
+                }
+              ],
+              response_format: { type: "json_object" },
+              temperature: 0.25
+            })
+          });
+
+          const data = await response.json();
+          if (response.ok) {
+            workingModel = modelId;
+            successData = data;
+            break;
+          } else {
+            lastError = `${modelId}: ${data.error?.message || response.status}`;
+          }
         }
 
-        const parsed = JSON.parse(data.choices[0].message.content);
+        if (!successData) {
+          return `Ни одна модель не приняла фото (${lastError}). Все доступные на аккаунте: ${allAvailable.join(", ")}`;
+        }
+
+        const parsed = JSON.parse(successData.choices[0].message.content);
 
         const singleWords = [];
         for (const rawWord of parsed.keywords || []) {
@@ -194,7 +209,7 @@ Strict rules:
         }
       }
 
-      return `Готово! Успешно заполнено: ${processedCount} из ${targetCards.length} (модель: ${activeModel}).`;
+      return `Готово! Заполнено фото: ${processedCount} из ${targetCards.length} (через ${workingModel}).`;
     },
     args: [apiKey, markAi]
   }, (results) => {
