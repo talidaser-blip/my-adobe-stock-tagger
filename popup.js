@@ -19,7 +19,7 @@ runBtn.addEventListener("click", async () => {
 
   chrome.storage.local.set({ groqKey: apiKey, markAi });
   runBtn.disabled = true;
-  statusDiv.textContent = "Ищу рабочую модель на вашем аккаунте Groq...";
+  statusDiv.textContent = "Заполняю по вашей инструкции (Title, 49 слов, категория)...";
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
@@ -55,20 +55,20 @@ runBtn.addEventListener("click", async () => {
           tempImg.crossOrigin = "anonymous";
           tempImg.onload = () => {
             const canvas = document.createElement("canvas");
-            const scale = 512 / Math.max(tempImg.naturalWidth, tempImg.naturalHeight, 1);
-            canvas.width = Math.round(tempImg.naturalWidth * scale) || 512;
-            canvas.height = Math.round(tempImg.naturalHeight * scale) || 512;
+            const scale = 384 / Math.max(tempImg.naturalWidth, tempImg.naturalHeight, 1);
+            canvas.width = Math.round(tempImg.naturalWidth * scale) || 384;
+            canvas.height = Math.round(tempImg.naturalHeight * scale) || 384;
             const ctx = canvas.getContext("2d");
             ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-            resolve(canvas.toDataURL("image/jpeg", 0.82));
+            resolve(canvas.toDataURL("image/jpeg", 0.72));
           };
           tempImg.onerror = () => {
             const canvas = document.createElement("canvas");
-            canvas.width = 512;
-            canvas.height = 512;
+            canvas.width = 384;
+            canvas.height = 384;
             const ctx = canvas.getContext("2d");
-            ctx.drawImage(imgEl, 0, 0, 512, 512);
-            resolve(canvas.toDataURL("image/jpeg", 0.82));
+            ctx.drawImage(imgEl, 0, 0, 384, 384);
+            resolve(canvas.toDataURL("image/jpeg", 0.72));
           };
           tempImg.src = imgEl.src;
         });
@@ -89,51 +89,61 @@ runBtn.addEventListener("click", async () => {
         element.dispatchEvent(new Event("change", { bubbles: true }));
       };
 
-      // Получаем реальный список моделей вашего аккаунта Groq
-      const modelsRes = await fetch("https://api.groq.com/openai/v1/models", {
-        headers: { "Authorization": `Bearer ${key}` }
-      });
-      if (!modelsRes.ok) {
-        const err = await modelsRes.json();
-        return `Ошибка авторизации Groq: ${err.error?.message || modelsRes.status}`;
-      }
-      const modelsData = await modelsRes.json();
-      const allAvailable = (modelsData.data || []).map((m) => m.id);
+      // Соответствие ваших кодов категорий Adobe Stock
+      const CATEGORY_NAMES = {
+        2: ["building", "architecture", "здания", "архитектура", "интерьер"],
+        5: ["landscape", "nature", "пейзаж", "природа"],
+        6: ["feeling", "emotion", "чувств", "эмоц"],
+        7: ["food", "еда", "напит"],
+        12: ["lifestyle", "образ жизни", "стиль жизни"]
+      };
 
-      // Отбираем кандидатов, которые могут поддерживать картинки
-      const visionCandidates = allAvailable.filter((id) =>
-        /vision|maverick|scout|llama-4|qwen|gemma|pixtral|multimodal/i.test(id) &&
-        !/whisper|guard|tts|embed/i.test(id)
-      );
+      const BANNED_WORDS = new Set([
+        "overlayeffect", "visual", "designconcept", "concept", "shot", "ai",
+        "generated", "artificial", "intelligence", "midjourney", "render", "rendering",
+        "image", "photo", "picture", "stock", "backgroundeffect", "abstractconcept"
+      ]);
 
-      if (visionCandidates.length === 0) {
-        return `На аккаунте нет Vision-моделей. Доступные модели: ${allAvailable.join(", ")}`;
-      }
-
-      let workingModel = null;
+      const MODEL_ID = "qwen/qwen3.8-27b";
       let processedCount = 0;
 
       for (let i = 0; i < targetCards.length; i++) {
         const card = targetCards[i];
         card.scrollIntoView({ behavior: "smooth", block: "center" });
         card.click();
-        await sleep(700);
+        await sleep(750);
 
         const img = card.querySelector("img");
         if (!img) continue;
 
         const base64Image = await getImageBase64(img);
 
-        const prompt = `Analyze this image for Adobe Stock microstock. Return ONLY a valid JSON object with keys "title" and "keywords".
-Strict rules:
-1. "title": Commercial descriptive English title between 100 and 180 characters. No brand names or trademarks.
-2. "keywords": Array of EXACTLY 48 single English words (strictly 1 word per item, NO two-word phrases, NO hyphens). Ordered by descending relevance (most important visual subjects first, conceptual words after).`;
+        const prompt = `You are a professional Adobe Stock metadata agent. Analyze this image and return ONLY a valid JSON object with keys: "title", "keywords", "category".
 
-        const candidatesToTry = workingModel ? [workingModel] : visionCandidates;
+CRITICAL RULES:
+1. "title":
+   - English language, up to 200 characters (aim for 120-185 chars).
+   - NO period at the end, first word capitalized, NO brand names.
+   - Must explicitly include: what is depicted + who is depicted (if a person is present) + environment/setting + lighting/atmosphere + ending with a commercial concept.
+   - Example style: "Double exposure portrait of young african woman with plant textures on warm background identity and nature harmony concept"
+
+2. "keywords":
+   - Array of AT LEAST 52 single English search words (we will trim to exact 49).
+   - Strictly 1 word per item, lowercase only, NO phrases, NO hyphens, NO duplicates.
+   - First 10 words MUST be the most important core nouns/subjects from the scene.
+   - Only real commercial buyer search terms. Strictly FORBIDDEN trash/AI words: overlayeffect, visual, designconcept, concept, shot, ai, generated, render, midjourney.
+
+3. "category":
+   - Return ONLY one integer from this exact rule:
+     * 6 (Feelings) or 12 (Lifestyle) for portraits/people
+     * 2 for interiors / architecture
+     * 5 for nature / landscapes
+     * 7 for food / drinks
+     * If in doubt, return 6.`;
+
         let successData = null;
-        let lastError = "";
 
-        for (const modelId of candidatesToTry) {
+        for (let attempt = 1; attempt <= 3; attempt++) {
           const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
             headers: {
@@ -141,7 +151,7 @@ Strict rules:
               "Content-Type": "application/json"
             },
             body: JSON.stringify({
-              model: modelId,
+              model: MODEL_ID,
               messages: [
                 {
                   role: "user",
@@ -158,42 +168,77 @@ Strict rules:
 
           const data = await response.json();
           if (response.ok) {
-            workingModel = modelId;
             successData = data;
             break;
+          }
+
+          const errMsg = data.error?.message || "";
+          if (response.status === 429 || errMsg.toLowerCase().includes("rate limit")) {
+            await sleep(12000);
           } else {
-            lastError = `${modelId}: ${data.error?.message || response.status}`;
+            return `Остановлено на фото ${i + 1}. Ошибка Groq: ${errMsg || response.status}`;
           }
         }
 
         if (!successData) {
-          return `Ни одна модель не приняла фото (${lastError}). Все доступные на аккаунте: ${allAvailable.join(", ")}`;
+          return `Остановлено на фото ${i + 1}: лимит запросов Groq. Подождите 1 минуту и нажмите снова.`;
         }
 
         const parsed = JSON.parse(successData.choices[0].message.content);
 
+        // 1. Очищаем Title (до 200 символов, с заглавной, без точки в конце)
+        if (parsed.title) {
+          let cleanTitle = String(parsed.title)
+            .replace(/\bshot\b/gi, "photo")
+            .replace(/[.!?]+$/g, "")
+            .trim();
+          cleanTitle = cleanTitle.charAt(0).toUpperCase() + cleanTitle.slice(1);
+          cleanTitle = cleanTitle.slice(0, 198).replace(/[.!?]+$/g, "").trim();
+
+          const titleInput = document.querySelector('textarea[name="title"], input[name="title"], textarea[aria-label*="title" i], textarea[placeholder*="title" i]');
+          if (titleInput) {
+            setNativeValue(titleInput, cleanTitle);
+          }
+        }
+
+        // 2. Очищаем Keywords: ровно 49 одиночных слов без мусора и дублей
         const singleWords = [];
         for (const rawWord of parsed.keywords || []) {
           const clean = String(rawWord).trim().toLowerCase().replace(/[^a-z]/g, "");
-          if (clean && clean.length > 1 && !singleWords.includes(clean)) {
+          if (clean && clean.length > 1 && !BANNED_WORDS.has(clean) && !singleWords.includes(clean)) {
             singleWords.push(clean);
           }
         }
-        const finalKeywords = singleWords.slice(0, 48).join(", ");
-
-        const titleInput = document.querySelector('textarea[name="title"], input[name="title"], textarea[aria-label*="title" i], textarea[placeholder*="title" i]');
-        if (titleInput && parsed.title) {
-          setNativeValue(titleInput, parsed.title.trim().slice(0, 195));
-        }
+        const exact49 = singleWords.slice(0, 49);
+        const finalKeywords = exact49.join(", ");
 
         const kwInput = document.querySelector('textarea[name="keywords"], textarea[aria-label*="keyword" i], textarea[placeholder*="keyword" i]');
         if (kwInput && finalKeywords) {
           setNativeValue(kwInput, finalKeywords);
         }
 
+        // 3. Выбираем категорию по вашей таблице (2, 5, 6, 7, 12; по умолчанию 6)
+        const catCode = [2, 5, 6, 7, 12].includes(Number(parsed.category)) ? Number(parsed.category) : 6;
+        const catSelect = document.querySelector('select[name*="category" i], select[aria-label*="category" i], select');
+        if (catSelect) {
+          const keywordsForCat = CATEGORY_NAMES[catCode] || CATEGORY_NAMES[6];
+          const matchedOption = Array.from(catSelect.options).find((opt) =>
+            opt.value === String(catCode) ||
+            keywordsForCat.some((kw) => opt.text.toLowerCase().includes(kw))
+          );
+          if (matchedOption) {
+            catSelect.value = matchedOption.value;
+            catSelect.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+
+        // 4. Галочка "Created using generative AI tools"
         if (shouldMarkAi) {
           const labels = Array.from(document.querySelectorAll("label, span, div"));
-          const aiLabel = labels.find((el) => el.textContent && el.textContent.toLowerCase().includes("generative ai"));
+          const aiLabel = labels.find((el) => el.textContent && (
+            el.textContent.toLowerCase().includes("generative ai") ||
+            el.textContent.toLowerCase().includes("искусственного интеллекта")
+          ));
           if (aiLabel) {
             const container = aiLabel.closest("label") || aiLabel.parentElement;
             const checkbox = container?.querySelector('input[type="checkbox"]') || document.querySelector('input[type="checkbox"][name*="generative" i], input[type="checkbox"][id*="generative" i]');
@@ -205,11 +250,11 @@ Strict rules:
 
         processedCount++;
         if (i < targetCards.length - 1) {
-          await sleep(2500);
+          await sleep(8000);
         }
       }
 
-      return `Готово! Заполнено фото: ${processedCount} из ${targetCards.length} (через ${workingModel}).`;
+      return `Готово! Заполнено фото: ${processedCount} из ${targetCards.length} (строго по вашей инструкции: Title + 49 слов + категория).`;
     },
     args: [apiKey, markAi]
   }, (results) => {
