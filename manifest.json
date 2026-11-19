@@ -1,9 +1,13 @@
 {
   "manifest_version": 3,
   "name": "My Fast Adobe Stock Tagger",
-  "version": "1.0",
+  "version": "1.1",
+  "description": "Быстрое автозаполнение Title, 48 одиночных тегов и отметки AI на Adobe Stock через Groq",
   "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["https://contributor.stock.adobe.com/*", "https://api.groq.com/*"],
+  "host_permissions": [
+    "https://contributor.stock.adobe.com/*",
+    "https://api.groq.com/*"
+  ],
   "action": {
     "default_popup": "popup.html"
   }
