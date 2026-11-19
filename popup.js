@@ -227,13 +227,12 @@ runBtn.addEventListener("click", async () => {
         }
         const parsed = JSON.parse(jsonMatch[0]);
 
-        // Ищем поля строго в правой панели редактирования (x > 65% ширины экрана)
         const rightTextareas = Array.from(document.querySelectorAll("textarea")).filter((ta) => {
           const r = ta.getBoundingClientRect();
           return r.width > 120 && r.left > window.innerWidth * 0.65;
         });
 
-        // 1. Заполняем Title (первое текстовое поле в правой панели)
+        // 1. Заполняем Title
         if (parsed.title) {
           let cleanTitle = String(parsed.title)
             .replace(/\bshot\b/gi, "photo")
@@ -248,7 +247,7 @@ runBtn.addEventListener("click", async () => {
           }
         }
 
-        // 2. Заполняем Keywords (второе текстовое поле в правой панели, ровно 49 слов)
+        // 2. Заполняем Keywords (ровно 49 слов)
         const singleWords = [];
         for (const rawWord of parsed.keywords || []) {
           const clean = String(rawWord).trim().toLowerCase().replace(/[^a-z]/g, "");
@@ -263,7 +262,7 @@ runBtn.addEventListener("click", async () => {
           setNativeValue(kwInput, finalKeywords);
         }
 
-        // 3. Выбираем категорию строго в правой панели
+        // 3. Выбираем категорию
         const catCode = [2, 5, 6, 7, 12].includes(Number(parsed.category)) ? Number(parsed.category) : 6;
         const rightSelects = Array.from(document.querySelectorAll("select")).filter((s) => s.getBoundingClientRect().left > window.innerWidth * 0.65);
         const catSelect = rightSelects.find((s) => Array.from(s.options).some((o) => o.value === "6" || o.text.toLowerCase().includes("люди") || o.text.toLowerCase().includes("feeling"))) || rightSelects[0];
@@ -279,19 +278,31 @@ runBtn.addEventListener("click", async () => {
           }
         }
 
-        // 4. Галочка "Созданный с помощью технологий искусственного интеллекта" СТРОГО в правой панели!
+        // 4. Галочка ИИ + вторая обязательная галочка "Люди и предметы являются вымышленными"
         if (shouldMarkAi) {
-          const rightCheckboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')).filter((cb) => {
-            const r = cb.getBoundingClientRect();
-            return r.left > window.innerWidth * 0.65;
-          });
-          const aiCheckbox = rightCheckboxes.find((cb) => {
+          const getRightCheckboxes = () => Array.from(document.querySelectorAll('input[type="checkbox"]')).filter((cb) => cb.getBoundingClientRect().left > window.innerWidth * 0.65);
+
+          const aiCheckbox = getRightCheckboxes().find((cb) => {
             const labelEl = cb.closest("label") || cb.parentElement;
             const txt = (labelEl?.textContent || "").toLowerCase();
             return txt.length < 150 && (txt.includes("generative ai") || txt.includes("искусственного интеллекта"));
           });
+
           if (aiCheckbox && !aiCheckbox.checked) {
             aiCheckbox.click();
+          }
+
+          // Ждём 400 мс, пока Adobe раскроет второй чекбокс "Люди и предметы являются вымышленными"
+          await sleep(400);
+
+          const fictionalCheckbox = getRightCheckboxes().find((cb) => {
+            const labelEl = cb.closest("label") || cb.parentElement;
+            const txt = (labelEl?.textContent || "").toLowerCase();
+            return txt.includes("вымышленными") || txt.includes("fictional");
+          });
+
+          if (fictionalCheckbox && !fictionalCheckbox.checked) {
+            fictionalCheckbox.click();
           }
         }
 
@@ -301,7 +312,7 @@ runBtn.addEventListener("click", async () => {
         }
       }
 
-      return `Готово! Быстро заполнено фото: ${processedCount} из ${selectedImgs.length} (Title + 49 слов + категория).`;
+      return `Готово! Быстро заполнено фото: ${processedCount} из ${selectedImgs.length} (Title + 49 слов + категория + галочки AI).`;
     },
     args: [apiKey, markAi]
   }, (results) => {
