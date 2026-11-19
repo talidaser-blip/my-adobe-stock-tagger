@@ -3,7 +3,6 @@ const aiCheckInput = document.getElementById("aiCheck");
 const runBtn = document.getElementById("runBtn");
 const statusDiv = document.getElementById("status");
 
-// Загружаем сохранённый ключ и настройку чекбокса
 chrome.storage.local.get(["groqKey", "markAi"], (res) => {
   if (res.groqKey) apiKeyInput.value = res.groqKey;
   if (typeof res.markAi === "boolean") aiCheckInput.checked = res.markAi;
@@ -35,11 +34,9 @@ runBtn.addEventListener("click", async () => {
     func: async (key, shouldMarkAi) => {
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-      // Ищем карточки загруженных файлов в сетке Adobe Stock
       const allCards = Array.from(document.querySelectorAll('[data-testid="asset-card"], .upload-tile, [class*="asset-card"], [class*="upload-item"]'))
         .filter((el) => el.querySelector('img'));
 
-      // Проверяем, есть ли среди них выделенные пользователем
       const selectedCards = allCards.filter((card) =>
         card.getAttribute("aria-selected") === "true" ||
         card.className.toLowerCase().includes("selected") ||
@@ -52,7 +49,6 @@ runBtn.addEventListener("click", async () => {
         return "Не найдены карточки фотографий на странице. Убедитесь, что открыта вкладка Uploaded Files.";
       }
 
-      // Функция конвертации превью в Base64
       const getImageBase64 = (imgEl) => {
         return new Promise((resolve) => {
           const tempImg = new Image();
@@ -67,7 +63,6 @@ runBtn.addEventListener("click", async () => {
             resolve(canvas.toDataURL("image/jpeg", 0.82));
           };
           tempImg.onerror = () => {
-            // Запасной вариант напрямую с DOM-элемента
             const canvas = document.createElement("canvas");
             canvas.width = 512;
             canvas.height = 512;
@@ -79,7 +74,6 @@ runBtn.addEventListener("click", async () => {
         });
       };
 
-      // Функция безопасного заполнения React-полей
       const setNativeValue = (element, value) => {
         const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set;
         const prototype = Object.getPrototypeOf(element);
@@ -95,13 +89,34 @@ runBtn.addEventListener("click", async () => {
         element.dispatchEvent(new Event("change", { bubbles: true }));
       };
 
+      // Автоматически находим рабочую Vision-модель на вашем аккаунте Groq
+      let activeModel = null;
+      const modelsRes = await fetch("https://api.groq.com/openai/v1/models", {
+        headers: { "Authorization": `Bearer ${key}` }
+      });
+      if (modelsRes.ok) {
+        const modelsData = await modelsRes.json();
+        const availableIds = (modelsData.data || []).map((m) => m.id);
+        const preferred = [
+          "meta-llama/llama-4-maverick-17b-128e-instruct",
+          "llama-3.2-11b-vision-preview",
+          "llama-3.2-90b-vision-preview",
+          "meta-llama/llama-4-scout-17b-16e-instruct"
+        ];
+        activeModel = preferred.find((id) => availableIds.includes(id)) ||
+                      availableIds.find((id) => id.includes("vision") || id.includes("llama-4"));
+      }
+      if (!activeModel) {
+        activeModel = "llama-3.2-11b-vision-preview";
+      }
+
       let processedCount = 0;
 
       for (let i = 0; i < targetCards.length; i++) {
         const card = targetCards[i];
         card.scrollIntoView({ behavior: "smooth", block: "center" });
         card.click();
-        await sleep(700); // Даём правой панели Adobe Stock обновиться под выбранное фото
+        await sleep(700);
 
         const img = card.querySelector("img");
         if (!img) continue;
@@ -120,7 +135,7 @@ Strict rules:
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
-            model: "meta-llama/llama-4-scout-17b-16e-instruct",
+            model: activeModel,
             messages: [
               {
                 role: "user",
@@ -137,12 +152,11 @@ Strict rules:
 
         const data = await response.json();
         if (!response.ok) {
-          return `Остановлено на фото ${i + 1}. Ошибка Groq: ${data.error?.message || response.status}`;
+          return `Остановлено на фото ${i + 1} (${activeModel}). Ошибка Groq: ${data.error?.message || response.status}`;
         }
 
         const parsed = JSON.parse(data.choices[0].message.content);
 
-        // Жёсткая очистка: ровно 48 одиночных слов без дублей
         const singleWords = [];
         for (const rawWord of parsed.keywords || []) {
           const clean = String(rawWord).trim().toLowerCase().replace(/[^a-z]/g, "");
@@ -152,19 +166,16 @@ Strict rules:
         }
         const finalKeywords = singleWords.slice(0, 48).join(", ");
 
-        // Вписываем Title
         const titleInput = document.querySelector('textarea[name="title"], input[name="title"], textarea[aria-label*="title" i], textarea[placeholder*="title" i]');
         if (titleInput && parsed.title) {
           setNativeValue(titleInput, parsed.title.trim().slice(0, 195));
         }
 
-        // Вписываем Keywords
         const kwInput = document.querySelector('textarea[name="keywords"], textarea[aria-label*="keyword" i], textarea[placeholder*="keyword" i]');
         if (kwInput && finalKeywords) {
           setNativeValue(kwInput, finalKeywords);
         }
 
-        // Автоматическое включение галочки "Created using generative AI tools"
         if (shouldMarkAi) {
           const labels = Array.from(document.querySelectorAll("label, span, div"));
           const aiLabel = labels.find((el) => el.textContent && el.textContent.toLowerCase().includes("generative ai"));
@@ -178,13 +189,12 @@ Strict rules:
         }
 
         processedCount++;
-        // Короткая пауза 2.5 сек, чтобы не превысить лимит бесплатного тарифа Groq (~20-30 запросов/мин)
         if (i < targetCards.length - 1) {
           await sleep(2500);
         }
       }
 
-      return `Готово! Успешно заполнено фотографий: ${processedCount} из ${targetCards.length}.`;
+      return `Готово! Успешно заполнено: ${processedCount} из ${targetCards.length} (модель: ${activeModel}).`;
     },
     args: [apiKey, markAi]
   }, (results) => {
