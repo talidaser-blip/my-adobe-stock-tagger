@@ -108,6 +108,7 @@ runBtn.addEventListener("click", async () => {
       };
 
       const setNativeValue = (element, value) => {
+        element.focus();
         const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set;
         const prototype = Object.getPrototypeOf(element);
         const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
@@ -120,6 +121,7 @@ runBtn.addEventListener("click", async () => {
         }
         element.dispatchEvent(new Event("input", { bubbles: true }));
         element.dispatchEvent(new Event("change", { bubbles: true }));
+        element.blur();
       };
 
       const CATEGORY_NAMES = {
@@ -136,7 +138,6 @@ runBtn.addEventListener("click", async () => {
         "image", "photo", "picture", "stock", "backgroundeffect", "abstractconcept"
       ]);
 
-      // Актуальные бесплатные Vision-модели на OpenRouter (с автоматическим переключением)
       const FREE_VISION_MODELS = [
         "google/gemma-3-27b-it:free",
         "qwen/qwen2.5-vl-72b-instruct:free",
@@ -220,13 +221,19 @@ runBtn.addEventListener("click", async () => {
           return `Ошибка на фото ${i + 1}: не удалось получить ответ (${lastError}). Проверьте ключ sk-or-v1-...`;
         }
 
-        // Извлекаем чистый JSON, даже если модель обернула его в ```json ... ```
         const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
           return `Ошибка разбора ответа на фото ${i + 1}, попробуйте запустить ещё раз.`;
         }
         const parsed = JSON.parse(jsonMatch[0]);
 
+        // Ищем поля строго в правой панели редактирования (x > 65% ширины экрана)
+        const rightTextareas = Array.from(document.querySelectorAll("textarea")).filter((ta) => {
+          const r = ta.getBoundingClientRect();
+          return r.width > 120 && r.left > window.innerWidth * 0.65;
+        });
+
+        // 1. Заполняем Title (первое текстовое поле в правой панели)
         if (parsed.title) {
           let cleanTitle = String(parsed.title)
             .replace(/\bshot\b/gi, "photo")
@@ -235,12 +242,13 @@ runBtn.addEventListener("click", async () => {
           cleanTitle = cleanTitle.charAt(0).toUpperCase() + cleanTitle.slice(1);
           cleanTitle = cleanTitle.slice(0, 198).replace(/[.!?]+$/g, "").trim();
 
-          const titleInput = document.querySelector('textarea[name="title"], input[name="title"], textarea[aria-label*="title" i], textarea[placeholder*="title" i]');
+          const titleInput = rightTextareas[0] || document.querySelector('textarea[name="title"], input[name="title"]');
           if (titleInput) {
             setNativeValue(titleInput, cleanTitle);
           }
         }
 
+        // 2. Заполняем Keywords (второе текстовое поле в правой панели, ровно 49 слов)
         const singleWords = [];
         for (const rawWord of parsed.keywords || []) {
           const clean = String(rawWord).trim().toLowerCase().replace(/[^a-z]/g, "");
@@ -250,13 +258,15 @@ runBtn.addEventListener("click", async () => {
         }
         const finalKeywords = singleWords.slice(0, 49).join(", ");
 
-        const kwInput = document.querySelector('textarea[name="keywords"], textarea[aria-label*="keyword" i], textarea[placeholder*="keyword" i]');
+        const kwInput = rightTextareas[1] || document.querySelector('textarea[name="keywords"]');
         if (kwInput && finalKeywords) {
           setNativeValue(kwInput, finalKeywords);
         }
 
+        // 3. Выбираем категорию строго в правой панели
         const catCode = [2, 5, 6, 7, 12].includes(Number(parsed.category)) ? Number(parsed.category) : 6;
-        const catSelect = document.querySelector('select[name*="category" i], select[aria-label*="category" i], select');
+        const rightSelects = Array.from(document.querySelectorAll("select")).filter((s) => s.getBoundingClientRect().left > window.innerWidth * 0.65);
+        const catSelect = rightSelects.find((s) => Array.from(s.options).some((o) => o.value === "6" || o.text.toLowerCase().includes("люди") || o.text.toLowerCase().includes("feeling"))) || rightSelects[0];
         if (catSelect) {
           const keywordsForCat = CATEGORY_NAMES[catCode] || CATEGORY_NAMES[6];
           const matchedOption = Array.from(catSelect.options).find((opt) =>
@@ -269,24 +279,25 @@ runBtn.addEventListener("click", async () => {
           }
         }
 
+        // 4. Галочка "Созданный с помощью технологий искусственного интеллекта" СТРОГО в правой панели!
         if (shouldMarkAi) {
-          const labels = Array.from(document.querySelectorAll("label, span, div"));
-          const aiLabel = labels.find((el) => el.textContent && (
-            el.textContent.toLowerCase().includes("generative ai") ||
-            el.textContent.toLowerCase().includes("искусственного интеллекта")
-          ));
-          if (aiLabel) {
-            const container = aiLabel.closest("label") || aiLabel.parentElement;
-            const checkbox = container?.querySelector('input[type="checkbox"]') || document.querySelector('input[type="checkbox"][name*="generative" i], input[type="checkbox"][id*="generative" i]');
-            if (checkbox && !checkbox.checked) {
-              checkbox.click();
-            }
+          const rightCheckboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')).filter((cb) => {
+            const r = cb.getBoundingClientRect();
+            return r.left > window.innerWidth * 0.65;
+          });
+          const aiCheckbox = rightCheckboxes.find((cb) => {
+            const labelEl = cb.closest("label") || cb.parentElement;
+            const txt = (labelEl?.textContent || "").toLowerCase();
+            return txt.length < 150 && (txt.includes("generative ai") || txt.includes("искусственного интеллекта"));
+          });
+          if (aiCheckbox && !aiCheckbox.checked) {
+            aiCheckbox.click();
           }
         }
 
         processedCount++;
         if (i < selectedImgs.length - 1) {
-          await sleep(1500);
+          await sleep(1200);
         }
       }
 
