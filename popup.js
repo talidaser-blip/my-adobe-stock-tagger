@@ -4,8 +4,8 @@ const runBtn = document.getElementById("runBtn");
 const stopBtn = document.getElementById("stopBtn");
 const statusDiv = document.getElementById("status");
 
-chrome.storage.local.get(["groqKey", "markAi"], (res) => {
-  if (res.groqKey) apiKeyInput.value = res.groqKey;
+chrome.storage.local.get(["openrouterKey", "markAi"], (res) => {
+  if (res.openrouterKey) apiKeyInput.value = res.openrouterKey;
   if (typeof res.markAi === "boolean") aiCheckInput.checked = res.markAi;
 });
 
@@ -19,13 +19,13 @@ runBtn.addEventListener("click", async () => {
   const markAi = aiCheckInput.checked;
 
   if (!apiKey) {
-    statusDiv.textContent = "Ошибка: вставьте API-ключ Groq (начинается на gsk_)!";
+    statusDiv.textContent = "Ошибка: вставьте API-ключ OpenRouter (начинается на sk-or-v1-)!";
     return;
   }
 
-  await chrome.storage.local.set({ groqKey: apiKey, markAi, stopRequested: false });
+  await chrome.storage.local.set({ openrouterKey: apiKey, markAi, stopRequested: false });
   runBtn.disabled = true;
-  statusDiv.textContent = "Идёт обработка... Если Groq попросит паузу для лимита, расширение само подождёт.";
+  statusDiv.textContent = "Быстрая обработка через OpenRouter...";
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
@@ -49,7 +49,7 @@ runBtn.addEventListener("click", async () => {
         return parentText.includes("Выбрать все") || parentText.includes("Select all");
       });
       if (selectAllCheckbox && selectAllCheckbox.checked) {
-        return "На странице активна галочка «Выбрать все» (100 файлов). Снимите её, выделите только нужные 1–5 фото и нажмите «Запустить».";
+        return "На странице активна галочка «Выбрать все» (100 файлов). Снимите её, выделите только нужные 1–10 фото и нажмите «Запустить».";
       }
 
       const allImgs = Array.from(document.querySelectorAll("img")).filter((img) => {
@@ -78,31 +78,30 @@ runBtn.addEventListener("click", async () => {
         return "Не найдено выделенных фотографий. Кликните мышкой по нужному фото (чтобы появилась синяя рамка) и нажмите «Запустить».";
       }
 
-      if (selectedImgs.length > 25) {
-        return `Выделено слишком много фото (${selectedImgs.length} шт.). Выделите от 1 до 15 фото за один раз.`;
+      if (selectedImgs.length > 30) {
+        return `Выделено слишком много фото (${selectedImgs.length} шт.). Выделите до 30 фото за один раз.`;
       }
 
-      // Оптимальная миниатюра 224px: минимальный расход токенов Groq, оригиналы на Adobe не меняются
       const getImageBase64 = (imgEl) => {
         return new Promise((resolve) => {
           const tempImg = new Image();
           tempImg.crossOrigin = "anonymous";
           tempImg.onload = () => {
             const canvas = document.createElement("canvas");
-            const scale = 224 / Math.max(tempImg.naturalWidth, tempImg.naturalHeight, 1);
-            canvas.width = Math.round(tempImg.naturalWidth * scale) || 224;
-            canvas.height = Math.round(tempImg.naturalHeight * scale) || 224;
+            const scale = 384 / Math.max(tempImg.naturalWidth, tempImg.naturalHeight, 1);
+            canvas.width = Math.round(tempImg.naturalWidth * scale) || 384;
+            canvas.height = Math.round(tempImg.naturalHeight * scale) || 384;
             const ctx = canvas.getContext("2d");
             ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-            resolve(canvas.toDataURL("image/jpeg", 0.65));
+            resolve(canvas.toDataURL("image/jpeg", 0.78));
           };
           tempImg.onerror = () => {
             const canvas = document.createElement("canvas");
-            canvas.width = 224;
-            canvas.height = 224;
+            canvas.width = 384;
+            canvas.height = 384;
             const ctx = canvas.getContext("2d");
-            ctx.drawImage(imgEl, 0, 0, 224, 224);
-            resolve(canvas.toDataURL("image/jpeg", 0.65));
+            ctx.drawImage(imgEl, 0, 0, 384, 384);
+            resolve(canvas.toDataURL("image/jpeg", 0.78));
           };
           tempImg.src = imgEl.src;
         });
@@ -137,7 +136,14 @@ runBtn.addEventListener("click", async () => {
         "image", "photo", "picture", "stock", "backgroundeffect", "abstractconcept"
       ]);
 
-      const MODEL_ID = "qwen/qwen3.8-27b";
+      // Актуальные бесплатные Vision-модели на OpenRouter (с автоматическим переключением)
+      const FREE_VISION_MODELS = [
+        "google/gemma-3-27b-it:free",
+        "qwen/qwen2.5-vl-72b-instruct:free",
+        "meta-llama/llama-4-maverick:free",
+        "openrouter/free"
+      ];
+
       let processedCount = 0;
 
       for (let i = 0; i < selectedImgs.length; i++) {
@@ -152,7 +158,7 @@ runBtn.addEventListener("click", async () => {
           img.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
           img.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
           img.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-          await sleep(750);
+          await sleep(650);
         }
 
         if (await isStopped()) {
@@ -161,69 +167,65 @@ runBtn.addEventListener("click", async () => {
 
         const base64Image = await getImageBase64(img);
 
-        const prompt = `Adobe Stock JSON {"title","keywords","category"}:
-1."title": English <=190 chars, no ending period, capitalized, no brands: subject + person + setting + light + ending with concept.
-2."keywords": array of 53 single lowercase English words (no phrases/hyphens/duplicates), top 10 most relevant, NO trash/AI words (overlayeffect,visual,designconcept,concept,shot,ai,generated,render).
-3."category": integer: 6 or 12 for people, 2 interiors, 5 nature, 7 food, default 6.`;
+        const prompt = `Return ONLY a raw JSON object (no markdown, no backticks) with keys "title", "keywords", "category":
+1. "title": Commercial English title up to 190 chars, NO period at the end, first letter capitalized, NO brand names. Must include: what is depicted + who is depicted (if person) + environment + lighting/atmosphere + ending with concept.
+2. "keywords": Array of 54 single lowercase English search words (no phrases, no hyphens, no duplicates). First 10 words must be the most important core subjects. Strictly NO trash/AI words (overlayeffect, visual, designconcept, concept, shot, ai, generated, render).
+3. "category": Integer: 6 or 12 for portraits/people, 2 for interiors/architecture, 5 for nature/landscapes, 7 for food, default 6.`;
 
-        let successData = null;
+        let rawContent = null;
+        let lastError = "";
 
-        // До 12 попыток с терпеливым ожиданием сброса минутного лимита Groq (до 2 минут ожидания без обрыва)
-        for (let attempt = 1; attempt <= 12; attempt++) {
+        for (const modelId of FREE_VISION_MODELS) {
           if (await isStopped()) {
             return `Остановлено! Успешно заполнено фото: ${processedCount} из ${selectedImgs.length}.`;
           }
 
-          const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${key}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              model: MODEL_ID,
-              messages: [
-                {
-                  role: "user",
-                  content: [
-                    { type: "text", text: prompt },
-                    { type: "image_url", image_url: { url: base64Image } }
-                  ]
-                }
-              ],
-              response_format: { type: "json_object" },
-              temperature: 0.25
-            })
-          });
+          try {
+            const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${key}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://contributor.stock.adobe.com",
+                "X-Title": "My Fast Adobe Stock Tagger"
+              },
+              body: JSON.stringify({
+                model: modelId,
+                messages: [
+                  {
+                    role: "user",
+                    content: [
+                      { type: "text", text: prompt },
+                      { type: "image_url", image_url: { url: base64Image } }
+                    ]
+                  }
+                ],
+                temperature: 0.25
+              })
+            });
 
-          const data = await response.json();
-          if (response.ok) {
-            successData = data;
-            break;
-          }
-
-          const errMsg = data.error?.message || "";
-          if (response.status === 429 || response.status >= 500 || errMsg.toLowerCase().includes("rate limit") || errMsg.toLowerCase().includes("overloaded")) {
-            const match = errMsg.match(/try again in ([\d.]+)s/i);
-            const waitMs = match ? (Math.ceil(parseFloat(match[1])) + 2) * 1000 : 12000;
-            // Разбиваем паузу на шаги по 1 сек, чтобы кнопка «Остановить» срабатывала мгновенно
-            const steps = Math.ceil(waitMs / 1000);
-            for (let s = 0; s < steps; s++) {
-              if (await isStopped()) {
-                return `Остановлено! Успешно заполнено фото: ${processedCount} из ${selectedImgs.length}.`;
-              }
-              await sleep(1000);
+            const data = await response.json();
+            if (response.ok && data.choices?.[0]?.message?.content) {
+              rawContent = data.choices[0].message.content;
+              break;
+            } else {
+              lastError = `${modelId}: ${data.error?.message || response.status}`;
             }
-          } else {
-            return `Ошибка на фото ${i + 1}: ${errMsg || response.status}`;
+          } catch (err) {
+            lastError = `${modelId}: ${err.message}`;
           }
         }
 
-        if (!successData) {
-          return `Остановлено на фото ${i + 1}: сервер Groq временно не отвечает, попробуйте через минуту.`;
+        if (!rawContent) {
+          return `Ошибка на фото ${i + 1}: не удалось получить ответ (${lastError}). Проверьте ключ sk-or-v1-...`;
         }
 
-        const parsed = JSON.parse(successData.choices[0].message.content);
+        // Извлекаем чистый JSON, даже если модель обернула его в ```json ... ```
+        const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          return `Ошибка разбора ответа на фото ${i + 1}, попробуйте запустить ещё раз.`;
+        }
+        const parsed = JSON.parse(jsonMatch[0]);
 
         if (parsed.title) {
           let cleanTitle = String(parsed.title)
@@ -284,16 +286,11 @@ runBtn.addEventListener("click", async () => {
 
         processedCount++;
         if (i < selectedImgs.length - 1) {
-          for (let s = 0; s < 5; s++) {
-            if (await isStopped()) {
-              return `Остановлено! Успешно заполнено фото: ${processedCount} из ${selectedImgs.length}.`;
-            }
-            await sleep(1000);
-          }
+          await sleep(1500);
         }
       }
 
-      return `Готово! Успешно заполнено: ${processedCount} из ${selectedImgs.length} выбранных фото.`;
+      return `Готово! Быстро заполнено фото: ${processedCount} из ${selectedImgs.length} (Title + 49 слов + категория).`;
     },
     args: [apiKey, markAi]
   }, (results) => {
